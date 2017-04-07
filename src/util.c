@@ -24,9 +24,6 @@
 #include "container.h"
 #include "../config.h"
 
-#define STATELESS_PASSWD_FILE "/usr/share/defaults/etc/passwd"
-#define STATELESS_GROUP_FILE "/usr/share/defaults/etc/group"
-
 char *read_cmdline(void)
 {
 	return NULL;
@@ -147,13 +144,13 @@ bool hyper_name_to_id(const char *name, unsigned long *val)
 	return true;
 }
 
-struct passwd *hyper_getpwnam_from_file(char *path, const char *name, uid_t uid)
+// the same as getpwnam(), but it only parses /etc/passwd and allows name to be id string
+struct passwd *hyper_getpwnam(const char *name)
 {
-	FILE *file = fopen(path, "r");
-
+	uid_t uid = (uid_t)id_or_max(name);
+	FILE *file = fopen("/etc/passwd", "r");
 	if (!file) {
-		fprintf(stderr, "failed to open file %s: %s\n",
-				path, strerror(errno));
+		perror("faile to open /etc/passwd");
 		return NULL;
 	}
 	for (;;) {
@@ -169,31 +166,13 @@ struct passwd *hyper_getpwnam_from_file(char *path, const char *name, uid_t uid)
 	return NULL;
 }
 
-/* the same as getpwnam(), but it only parses "/etc/passwd" and stateless file 
- * "/usr/share/defaults/etc/passwd" and allows name to be id string.
- */
-struct passwd *hyper_getpwnam(const char *name)
+// the same as getgrnam(), but it only parses /etc/group and allows the name to be id string
+struct group *hyper_getgrnam(const char *name)
 {
-	struct passwd *pwd;
-	uid_t uid = (uid_t)id_or_max(name);
-
-	pwd = hyper_getpwnam_from_file("/etc/passwd", name, uid);
-	if ( !pwd)
-		pwd = hyper_getpwnam_from_file(STATELESS_PASSWD_FILE, name, uid);
-	return pwd;
-}
-
-struct group *hyper_getgrnam_from_file(char *path, const char *name, gid_t gid)
-{
-	FILE *file;
-
-	if (!path || !name) {
-		return NULL;
-	}
-	file = fopen(path, "r");
-
+	gid_t gid = (gid_t)id_or_max(name);
+	FILE *file = fopen("/etc/group", "r");
 	if (!file) {
-		fprintf(stderr, "failed to open file %s\n", path);
+		perror("faile to open /etc/group");
 		return NULL;
 	}
 	for (;;) {
@@ -209,62 +188,19 @@ struct group *hyper_getgrnam_from_file(char *path, const char *name, gid_t gid)
 	return NULL;
 }
 
-
-/* the same as getgrnam(), but it only parses /etc/group and /usr/share/defaults/etc/group
- * and allows the name to be id string
- */
-struct group *hyper_getgrnam(const char *name)
-{
-	struct group *grp;
-	gid_t gid = (gid_t)id_or_max(name);
-
-	grp = hyper_getgrnam_from_file("/etc/group", name, gid);
-	if (!grp)
-		grp = hyper_getgrnam_from_file(STATELESS_GROUP_FILE,
-						 name, gid);
-	return grp;
-}
-
 // the same as getgrouplist(), but it only parses /etc/group
 int hyper_getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups)
 {
 	int nr = 0, ret;
-	bool stateless = false;
-
-	FILE *file= fopen("/etc/group", "r");
+	FILE *file = fopen("/etc/group", "r");
 	if (!file) {
-		perror("failed to open /etc/group, trying stateless file to get group list");
-		file = fopen(STATELESS_GROUP_FILE, "r");
-		stateless = true;
-		if (!file) {
-			perror("not able to open stateless file either");
-			return -1;
-		}
+		perror("faile to open /etc/group");
+		return -1;
 	}
-
-	/* We are parsing both the etc and stateless files here,
-	 * trying to add groups from both. Not sure if we should just read one
-         */
 	for (;;) {
 		struct group *gr = fgetgrent(file);
-
-		/* All entries in both /etc and stateless group files
-		 * have been parsed.
-		 */
-		if (!gr && stateless) {
+		if (!gr)
 			break;
-		} else if ( !gr && !stateless ) {
-			/* Try to parse the stateless file if present
-			*/
-			stateless = true;
-			fclose(file);
-			file = fopen(STATELESS_GROUP_FILE, "r");
-			if (!file)
-				break;
-			else
-				continue;
-		}
-
 		int j;
 		for (j = 0; gr->gr_mem && gr->gr_mem[j]; j++) {
 			if (!strcmp(gr->gr_mem[j], user)) {
