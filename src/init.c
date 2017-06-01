@@ -536,6 +536,7 @@ static int hyper_destroy_pod(struct hyper_pod *pod, int error)
 	} else {
 		/* Kill pod */
 		hyper_term_all(pod);
+		hyper_pod_destroyed(0);
 	}
 	return 0;
 }
