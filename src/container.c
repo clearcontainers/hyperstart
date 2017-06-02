@@ -534,7 +534,6 @@ static int hyper_setup_container_rootfs(void *data)
 
 	if (container->fstype && hyper_rescan_scsi() < 0) {
 		fprintf(stdout, "rescan scsi failed\n");
-		goto fail;
 	}
 
 	if (mount("", "/", NULL, MS_SLAVE|MS_REC, NULL) < 0) {
