@@ -29,7 +29,8 @@ struct stdio_config {
 };
 
 static int hyper_release_exec(struct hyper_exec *);
-static void hyper_exec_process(struct hyper_exec *exec, struct stdio_config *io);
+static void hyper_exec_process(struct hyper_exec *exec, int sync_pipe_fd,
+				struct stdio_config *io);
 
 static int send_exec_finishing(uint64_t seq, int len, int code)
 {
@@ -475,7 +476,8 @@ static int hyper_setup_stdio_events(struct hyper_exec *exec, struct stdio_config
 	return 0;
 }
 
-static int hyper_do_exec_cmd(struct hyper_exec *exec, int pipe, struct stdio_config *io)
+static int hyper_do_exec_cmd(struct hyper_exec *exec, int pipe,
+				int sync_pipe_fd, struct stdio_config *io)
 {
 	struct hyper_container *c;
 
@@ -517,15 +519,18 @@ static int hyper_do_exec_cmd(struct hyper_exec *exec, int pipe, struct stdio_con
 	else
 		unsetenv("TERM");
 
-	hyper_exec_process(exec, io);
+	hyper_exec_process(exec, sync_pipe_fd, io);
 
 out:
 	_exit(125);
 }
 
 // do the exec, no return
-static void hyper_exec_process(struct hyper_exec *exec, struct stdio_config *io)
+static void hyper_exec_process(struct hyper_exec *exec, int sync_pipe_fd,
+				struct stdio_config *io)
 {
+	int ret = 125;
+
 	if (sigprocmask(SIG_SETMASK, &orig_mask, NULL) < 0) {
 		perror("sigprocmask restore mask failed");
 		goto exit;
@@ -561,14 +566,21 @@ static void hyper_exec_process(struct hyper_exec *exec, struct stdio_config *io)
 		 /* the exit codes follow the `chroot` standard,
 		    see docker/docs/reference/run.md#exit-status */
 		if (err == ENOENT)
-			_exit(127);
+			ret = 127;
 		else if (err == EACCES)
-			_exit(126);
+			ret = 126;
+
+		if (sync_pipe_fd >= 0 &&
+		    write(sync_pipe_fd, &ret, sizeof(ret)) != sizeof(ret)) {
+			perror("could not send error code through sync_pipe");
+		}
+
+		_exit(ret);
 	}
 
 exit:
 	fflush(NULL);
-	_exit(125);
+	_exit(ret);
 }
 
 static void hyper_free_exec(struct hyper_exec *exec)
@@ -606,9 +618,24 @@ int hyper_exec_cmd(char *json, int length)
 	return ret;
 }
 
+int hyper_wait_process_start(int fd)
+{
+	int ret = -1;
+
+	if (read(fd, &ret, sizeof(ret)) != sizeof(ret)) {
+		// The other end has been closed because the process has been
+		// properly started.
+		return 0;
+	}
+
+	fprintf(stderr, "error code %d received\n", ret);
+	return ret;
+}
+
 int hyper_run_process(struct hyper_exec *exec)
 {
 	int pipe[2] = {-1, -1};
+	int sync_pipe[2] = {-1, -1};
 	int pid, ret = -1;
 	uint32_t type;
 	struct stdio_config io = {-1, -1,-1, -1,-1, -1};
@@ -634,14 +661,22 @@ int hyper_run_process(struct hyper_exec *exec)
 		goto close_tty;
 	}
 
+	if (pipe2(sync_pipe, O_CLOEXEC) < 0) {
+		perror("create sync_pipe failed");
+		goto close_tty;
+	}
+
 	pid = fork();
 	if (pid < 0) {
 		perror("fork prerequisite process failed");
 		goto close_tty;
 	} else if (pid == 0) {
-		hyper_do_exec_cmd(exec, pipe[1], &io);
+		hyper_do_exec_cmd(exec, pipe[1], sync_pipe[1], &io);
 	}
 	fprintf(stdout, "prerequisite process pid %d\n", pid);
+
+	// Close sync_pipe fd from the parent.
+	close_if_set(sync_pipe[1]);
 
 	if (hyper_get_type(pipe[0], &type) < 0 || (int)type < 0) {
 		fprintf(stderr, "run process failed\n");
@@ -650,6 +685,11 @@ int hyper_run_process(struct hyper_exec *exec)
 
 	if (hyper_setup_stdio_events(exec, &io) < 0) {
 		fprintf(stderr, "add pts master event failed\n");
+		goto close_tty;
+	}
+
+	if (hyper_wait_process_start(sync_pipe[0])) {
+		fprintf(stderr, "process start failed\n");
 		goto close_tty;
 	}
 
@@ -668,6 +708,8 @@ out:
 	if (io.stderrfd >= 0)
 		close(io.stderrfd);
 
+	close(sync_pipe[0]);
+	close(sync_pipe[1]);
 	close(pipe[0]);
 	close(pipe[1]);
 	return ret;
