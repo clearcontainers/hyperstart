@@ -784,6 +784,7 @@ void hyper_cleanup_container(struct hyper_container *c, struct hyper_pod *pod)
 		perror("umount devpts failed");
 
 	close(c->ns);
+	close(c->pid_ns);
 	hyper_cleanup_container_portmapping(c, pod);
 	hyper_free_container(c);
 }

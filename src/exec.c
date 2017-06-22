@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
+#include <sys/mount.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <dirent.h>
@@ -480,6 +481,7 @@ static int hyper_do_exec_cmd(struct hyper_exec *exec, int pipe,
 				int sync_pipe_fd, struct stdio_config *io)
 {
 	struct hyper_container *c;
+	int ret;
 
 	if (hyper_enter_sandbox(exec->pod, pipe) < 0) {
 		perror("enter pidns of pod init failed");
@@ -497,8 +499,43 @@ static int hyper_do_exec_cmd(struct hyper_exec *exec, int pipe,
 		perror("fail to enter container ns");
 		goto out;
 	}
+
+	/* c->pid_ns is set in hyper_run_process based off the pid sent over the pipe */
+	if (c->pid_ns > 0) {
+		if (setns(c->pid_ns, CLONE_NEWPID) < 0) {
+			perror("fail to enter container pid ns");
+			goto out;
+		}
+	} else {
+		if (unshare(CLONE_NEWPID) < 0) {
+			perror("failed to create new pid ns");
+			goto out;
+		}
+	}
+
+	/* current process isn't in the pidns even though setns(pidns, CLONE_NEWPID)
+	 * was called. fork() is needed, so that the child process will run in
+	 * the pidns, see man 2 setns */
+	ret = fork();
+	if (ret < 0) {
+		perror("failed to fork");
+		goto out;
+	} else if (ret > 0) {
+		fprintf(stdout, "created child process pid=%d in the sandbox\n", ret);
+		if (pipe > 0) {
+			hyper_send_type(pipe, ret);
+		}
+		_exit(0);
+	}
+
 	if (chdir("/") < 0) {
 		perror("fail to change to the root of the rootfs");
+		goto out;
+	}
+
+	/* iff creating new pid namespace remount /proc inside */
+	if (c->pid_ns == -1 && mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) < 0) {
+		perror("failed to mount /proc after pid namespace switch");
 		goto out;
 	}
 
@@ -639,6 +676,8 @@ int hyper_run_process(struct hyper_exec *exec)
 	int pid, ret = -1;
 	uint32_t type;
 	struct stdio_config io = {-1, -1,-1, -1,-1, -1};
+	struct hyper_container *c;
+	char path[128];
 
 	if (exec->argv == NULL || exec->seq == 0 || exec->container_id == NULL || strlen(exec->container_id) == 0) {
 		fprintf(stderr, "cmd is %p, seq %" PRIu64 ", container %s\n",
@@ -681,6 +720,21 @@ int hyper_run_process(struct hyper_exec *exec)
 	if (hyper_get_type(pipe[0], &type) < 0 || (int)type < 0) {
 		fprintf(stderr, "run process failed\n");
 		goto close_tty;
+	}
+
+	c = hyper_find_container(exec->pod, exec->container_id);
+	if (c == NULL) {
+		fprintf(stderr, "can not find container %s\n", exec->container_id);
+		goto out;
+	}
+
+	if (c->pid_ns < 0) {
+		sprintf(path, "/proc/%d/ns/pid", type);
+		c->pid_ns = open(path, O_RDONLY | O_CLOEXEC);
+		if (c->pid_ns < 0) {
+			perror("open container pid ns failed");
+			goto close_tty;
+		}
 	}
 
 	if (hyper_setup_stdio_events(exec, &io) < 0) {

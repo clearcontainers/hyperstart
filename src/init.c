@@ -333,15 +333,8 @@ out:
 // enter the sanbox and pass to the child, shouldn't call from the init process
 int hyper_enter_sandbox(struct hyper_pod *pod, int pidpipe)
 {
-	int ret = -1, pidns = -1, utsns = -1, ipcns = -1;
+	int ret = -1, utsns = -1, ipcns = -1;
 	char path[512];
-
-	sprintf(path, "/proc/%d/ns/pid", pod->init_pid);
-	pidns = open(path, O_RDONLY| O_CLOEXEC);
-	if (pidns < 0) {
-		perror("fail to open pidns of pod init");
-		goto out;
-	}
 
 	sprintf(path, "/proc/%d/ns/uts", pod->init_pid);
 	utsns = open(path, O_RDONLY| O_CLOEXEC);
@@ -357,32 +350,14 @@ int hyper_enter_sandbox(struct hyper_pod *pod, int pidpipe)
 		goto out;
 	}
 
-	if (setns(pidns, CLONE_NEWPID) < 0 ||
-	    setns(utsns, CLONE_NEWUTS) < 0 ||
+	if (setns(utsns, CLONE_NEWUTS) < 0 ||
 	    setns(ipcns, CLONE_NEWIPC) < 0) {
 		perror("fail to enter the sandbox");
 		goto out;
 	}
 
-	/* current process isn't in the pidns even setns(pidns, CLONE_NEWPID)
-	 * was called. fork() is needed, so that the child process will run in
-	 * the pidns, see man 2 setns */
-	ret = fork();
-	if (ret < 0) {
-		perror("fail to fork");
-		goto out;
-	} else if (ret > 0) {
-		fprintf(stdout, "create child process pid=%d in the sandbox\n", ret);
-		if (pidpipe > 0) {
-			hyper_send_type(pidpipe, ret);
-		}
-		_exit(0);
-	}
-
+	ret = 0;
 out:
-	if (pidns >= 0)
-		close(pidns);
-
 	if (ipcns >= 0)
 		close(ipcns);
 
@@ -561,6 +536,7 @@ static int hyper_destroy_pod(struct hyper_pod *pod, int error)
 	} else {
 		/* Kill pod */
 		hyper_term_all(pod);
+		hyper_pod_destroyed(0);
 	}
 	return 0;
 }
